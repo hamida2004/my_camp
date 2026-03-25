@@ -1,15 +1,15 @@
-import { View, Text, TextInput, Button, FlatList, TouchableOpacity, Alert, Linking } from "react-native";
-import { useState } from "react";
-import { db , deletePersonCascade } from "../../../database/db";
-import { router, useFocusEffect } from "expo-router";
+import { View, Text, TextInput, Button, FlatList, TouchableOpacity, Alert, Linking, ScrollView } from "react-native";
+import { useState, useEffect } from "react";
+import { db, deletePersonCascade } from "../../../database/db";
+import { router } from "expo-router";
 import * as Print from "expo-print";
 import * as Sharing from "expo-sharing";
 import { MaterialIcons } from "@expo/vector-icons";
 import { translations } from "../../../translations";
+import { dbEvents } from "../../../events/events"; // Import EventEmitter
 
 export default function Home() {
-
-  const [lang,setLang] = useState("en");
+  const [lang, setLang] = useState("en");
   const t = translations[lang];
 
   const [people, setPeople] = useState([]);
@@ -18,6 +18,7 @@ export default function Home() {
   const [money, setMoney] = useState("");
   const [parentPhone, setParentPhone] = useState("");
 
+  // Load all people from DB and calculate remaining
   const loadPeople = () => {
     const result = db.getAllSync("SELECT * FROM people");
     const updated = result.map(person => {
@@ -30,9 +31,15 @@ export default function Home() {
     setPeople(updated);
   };
 
-  useFocusEffect(() => {
-    loadPeople();
-  });
+  // Refresh on DB changes
+  useEffect(() => {
+    loadPeople(); // initial load
+
+    const listener = () => loadPeople();
+    dbEvents.on("dbUpdated", listener);
+
+    return () => dbEvents.removeListener("dbUpdated", listener);
+  }, []);
 
   const deletePerson = (personId) => {
     Alert.alert(
@@ -45,7 +52,7 @@ export default function Home() {
           style: "destructive",
           onPress: () => {
             deletePersonCascade(personId);
-            loadPeople();
+            dbEvents.emit("dbUpdated"); // Notify other screens
           },
         },
       ]
@@ -65,7 +72,7 @@ export default function Home() {
     setMoney("");
     setParentPhone("");
 
-    loadPeople();
+    dbEvents.emit("dbUpdated"); // Notify other screens
   };
 
   const getColor = (remaining, initial) => {
@@ -76,7 +83,6 @@ export default function Home() {
   };
 
   const changeLanguage = () => {
-
     Alert.alert(
       "Language",
       "Choose language",
@@ -102,7 +108,7 @@ export default function Home() {
             db.runSync("DELETE FROM inventory");
             db.runSync("DELETE FROM people");
             db.runSync("DELETE FROM items");
-            loadPeople();
+            dbEvents.emit("dbUpdated"); // Notify other screens
           },
         },
       ]
@@ -110,53 +116,25 @@ export default function Home() {
   };
 
   const exportPDF = async () => {
-
     const now = new Date();
-
     let html = `
-    <html dir="${lang==="ar"?"rtl":"ltr"}">
-    <head>
-    <meta charset="UTF-8">
-    <style>
-
-    body{
-    font-family:Arial;
-    text-align:center;
-    margin:50px;
-    direction:${lang==="ar"?"rtl":"ltr"};
-    }
-
-    table{
-    width:80%;
-    margin:auto;
-    border-collapse:collapse;
-    }
-
-    th,td{
-    border:1px solid #555;
-    padding:8px;
-    }
-
-    th{
-    background:#3498db;
-    color:white;
-    }
-
-    .page{
-    page-break-after:always;
-    }
-
-    </style>
-    </head>
-
-    <body>
-
-    <h1>${t.reportTitle}</h1>
-    <p>${t.date}: ${now.toLocaleString()}</p>
+      <html dir="${lang==="ar"?"rtl":"ltr"}">
+      <head>
+      <meta charset="UTF-8">
+      <style>
+      body { font-family:Arial; text-align:center; margin:50px; direction:${lang==="ar"?"rtl":"ltr"}; }
+      table { width:80%; margin:auto; border-collapse:collapse; }
+      th,td { border:1px solid #555; padding:8px; }
+      th { background:#3498db; color:white; }
+      .page { page-break-after:always; }
+      </style>
+      </head>
+      <body>
+      <h1>${t.reportTitle}</h1>
+      <p>${t.date}: ${now.toLocaleString()}</p>
     `;
 
-    people.forEach(person=>{
-
+    people.forEach(person => {
       const totalExpenses = db.getFirstSync(
         "SELECT SUM(amount) as total FROM expenses WHERE personId=?",
         [person.id]
@@ -170,179 +148,115 @@ export default function Home() {
       );
 
       const table = inventory.length
-      ? `
-      <table>
-      <tr>
-      <th>${t.itemName}</th>
-      <th>${t.quantity}</th>
-      </tr>
+        ? `<table>
+            <tr><th>${t.itemName}</th><th>${t.quantity}</th></tr>
+            ${inventory.map(i => `<tr><td>${i.name}</td><td>${i.quantity}</td></tr>`).join("")}
+          </table>`
+        : `<p>${t.noItems}</p>`;
 
-      ${inventory.map(i=>`
-      <tr>
-      <td>${i.name}</td>
-      <td>${i.quantity}</td>
-      </tr>
-      `).join("")}
-
-      </table>
-      `
-      : `<p>${t.noItems}</p>`;
-
-      html+=`
-
-      <div class="page">
-
-      <h2>${person.name}</h2>
-
-      <p>${t.birthDate}: ${person.birthDate}</p>
-
-      <p>${t.initialBudget}: ${person.money} DA</p>
-
-      <p>${t.remaining}: ${remaining} DA</p>
-
-      <p>${t.parentPhone}: <a href="tel:${person.parentPhone}">${person.parentPhone}</a></p>
-
-      <p>${t.inventory}</p>
-
-      ${table}
-
-      </div>
+      html += `
+        <div class="page">
+          <h2>${person.name}</h2>
+          <p>${t.birthDate}: ${person.birthDate}</p>
+          <p>${t.initialBudget}: ${person.money} DA</p>
+          <p>${t.remaining}: ${remaining} DA</p>
+          <p>${t.parentPhone}: <a href="tel:${person.parentPhone}">${person.parentPhone}</a></p>
+          <p>${t.inventory}</p>
+          ${table}
+        </div>
       `;
     });
 
-    html+=`</body></html>`;
+    html += `</body></html>`;
 
-    const {uri} = await Print.printToFileAsync({html});
-
+    const { uri } = await Print.printToFileAsync({ html });
     await Sharing.shareAsync(uri);
   };
 
   return (
+    <View style={{ flex:1, padding:20, backgroundColor:"#f9f9f9", paddingVertical:80 }}>
 
-<View style={{ flex:1,padding:20,backgroundColor:"#f9f9f9",paddingVertical:80 }}>
+      {/* LANGUAGE ICON */}
+      <TouchableOpacity onPress={changeLanguage} style={{ position:"absolute", top:40, right:20, zIndex:20 }}>
+        <MaterialIcons name="language" size={28} color="#3498db"/>
+      </TouchableOpacity>
 
-  {/* LANGUAGE ICON */}
+      {/* ADD PERSON */}
+      <View style={{ marginBottom:20, backgroundColor:"#fff", padding:15, borderRadius:10 }}>
+        <Text style={{fontSize:18,fontWeight:"bold",marginBottom:10}}>{t.addPerson}</Text>
+        <TextInput placeholder={t.name} value={name} onChangeText={setName} style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}/>
+        <TextInput placeholder={t.birthDate} value={birthDate} onChangeText={setBirthDate} style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}/>
+        <TextInput placeholder={t.budget} value={money} onChangeText={setMoney} keyboardType="numeric" style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}/>
+        <TextInput placeholder={t.parentPhone} value={parentPhone} onChangeText={setParentPhone} keyboardType="phone-pad" style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}/>
+        <Button title={t.addPerson} onPress={addPerson} color="#3498db"/>
+      </View>
 
-  <TouchableOpacity
-  onPress={changeLanguage}
-  style={{
-    position:"absolute",
-    top:40,
-    right:20,
-    zIndex:20
-  }}
-  >
-  <MaterialIcons name="language" size={28} color="#3498db"/>
-  </TouchableOpacity>
+      {/* RESET / EXPORT */}
+      <View style={{flexDirection:"row", justifyContent:"space-between", marginBottom:20}}>
+        <Button title={t.resetDB} color="#e74c3c" onPress={resetDB}/>
+        <Button title={t.exportPDF} color="#2ecc71" onPress={exportPDF}/>
+      </View>
 
-  {/* ADD PERSON */}
+      {/* LIST OF PEOPLE */}
+    <ScrollView showsVerticalScrollIndicator={false}>
 
-<View style={{
-marginBottom:20,
-backgroundColor:"#fff",
-padding:15,
-borderRadius:10
-}}>
+  {people.map((item) => (
+    <View
+      key={item.id}
+      style={{
+        backgroundColor:"#fff",
+        padding:15,
+        borderRadius:10,
+        marginBottom:15,
+        position:"relative"
+      }}
+    >
 
-<Text style={{fontSize:18,fontWeight:"bold",marginBottom:10}}>
-{t.addPerson}
-</Text>
+      <TouchableOpacity
+        onPress={()=>deletePerson(item.id)}
+        style={{ position:"absolute", top:10, right:10 }}
+      >
+        <MaterialIcons name="delete-outline" size={22} color="#e74c3c"/>
+      </TouchableOpacity>
 
-<TextInput
-placeholder={t.name}
-value={name}
-onChangeText={setName}
-style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}
-/>
+      <TouchableOpacity
+        onPress={()=>router.push(`/personInventory?id=${item.id}`)}
+      >
+        <Text style={{fontSize:16,fontWeight:"bold"}}>
+          {item.name}
+        </Text>
 
-<TextInput
-placeholder={t.birthDate}
-value={birthDate}
-onChangeText={setBirthDate}
-style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}
-/>
+        <Text>
+          {t.birthDate}: {item.birthDate}
+        </Text>
 
-<TextInput
-placeholder={t.budget}
-value={money}
-onChangeText={setMoney}
-keyboardType="numeric"
-style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}
-/>
+        <Text>
+          {t.initialBudget}: {item.money} DA
+        </Text>
 
-<TextInput
-placeholder={t.parentPhone}
-value={parentPhone}
-onChangeText={setParentPhone}
-keyboardType="phone-pad"
-style={{borderWidth:1,borderColor:"#ddd",borderRadius:8,padding:10,marginBottom:10}}
-/>
+        <Text
+          style={{
+            color:getColor(item.remaining,item.money),
+            fontWeight:"bold"
+          }}
+        >
+          {t.remaining}: {item.remaining} DA
+        </Text>
 
-<Button title={t.addPerson} onPress={addPerson} color="#3498db"/>
+        <Text
+          style={{color:"#3498db", fontWeight:"bold"}}
+          onPress={()=>Linking.openURL(`tel:${item.parentPhone}`)}
+        >
+          {t.parentPhone}: {item.parentPhone}
+        </Text>
 
-</View>
+      </TouchableOpacity>
 
-<View style={{flexDirection:"row",justifyContent:"space-between",marginBottom:20}}>
+    </View>
+  ))}
 
-<Button title={t.resetDB} color="#e74c3c" onPress={resetDB}/>
-<Button title={t.exportPDF} color="#2ecc71" onPress={exportPDF}/>
+</ScrollView>
 
-</View>
-
-<FlatList
-data={people}
-keyExtractor={item=>item.id.toString()}
-renderItem={({item})=>(
-
-<View style={{
-backgroundColor:"#fff",
-padding:15,
-borderRadius:10,
-marginBottom:15,
-position:"relative"
-}}>
-
-<TouchableOpacity
-onPress={()=>deletePerson(item.id)}
-style={{position:"absolute",top:10,right:10}}
->
-
-<MaterialIcons name="delete-outline" size={22} color="#e74c3c"/>
-
-</TouchableOpacity>
-
-<TouchableOpacity
-onPress={()=>router.push(`/personInventory?id=${item.id}`)}
->
-
-<Text style={{fontSize:16,fontWeight:"bold"}}>{item.name}</Text>
-
-<Text>{t.birthDate}: {item.birthDate}</Text>
-
-<Text>{t.initialBudget}: {item.money} DA</Text>
-
-<Text style={{color:getColor(item.remaining,item.money),fontWeight:"bold"}}>
-
-{t.remaining}: {item.remaining} DA
-
-</Text>
-
-<Text
-style={{color:"#3498db",fontWeight:"bold"}}
-onPress={()=>Linking.openURL(`tel:${item.parentPhone}`)}
->
-
-{t.parentPhone}: {item.parentPhone}
-
-</Text>
-
-</TouchableOpacity>
-
-</View>
-
-)}
-/>
-
-</View>
-);
+    </View>
+  );
 }

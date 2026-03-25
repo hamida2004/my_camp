@@ -1,5 +1,5 @@
 import * as SQLite from "expo-sqlite";
-
+ import {dbEvents } from '../events/events'
 export const db = SQLite.openDatabaseSync("bagapp.db");
 
 export const initDB = () => {
@@ -37,3 +37,4 @@ export const deletePersonCascade = (personId) => {
   db.runSync("DELETE FROM inventory WHERE personId=?", [personId]);
   db.runSync("DELETE FROM people WHERE id=?", [personId]);
 };
+dbEvents.emit("dbUpdated");
